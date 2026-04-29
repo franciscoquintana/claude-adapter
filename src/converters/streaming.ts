@@ -320,6 +320,7 @@ function finishStream(state: StreamingState, raw: any): void {
             stop_sequence: null,
         },
         usage: {
+            input_tokens: state.inputTokens,
             output_tokens: state.outputTokens,
             cache_read_input_tokens: state.cachedInputTokens,
         },
