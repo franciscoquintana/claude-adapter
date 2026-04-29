@@ -55,6 +55,8 @@ interface StreamingState {
     hasStarted: boolean;
     textContent: string;
     textBlockOpen: boolean;
+    pendingReasoning: string;
+    reasoningDecided: boolean;
 }
 
 /**
@@ -79,6 +81,8 @@ export async function streamOpenAIToAnthropic(
         hasStarted: false,
         textContent: '',
         textBlockOpen: false,
+        pendingReasoning: '',
+        reasoningDecided: false,
     };
 
     // Access the underlying Node.js response for SSE streaming
@@ -129,6 +133,32 @@ function processChunk(
     }
 
     const delta = choice.delta;
+    const reasoning = (delta as any).reasoning_content;
+    const hasReasoning = typeof reasoning === 'string' && reasoning.length > 0;
+    const hasContent = typeof delta.content === 'string' && delta.content.length > 0;
+    const hasToolCalls = Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0;
+
+    // Buffer reasoning_content until we know whether this is a text or tool-call response
+    if (hasReasoning && !hasContent && !hasToolCalls && !choice.finish_reason) {
+        if (!state.reasoningDecided) {
+            state.pendingReasoning += reasoning;
+        }
+        return;
+    }
+
+    // First non-reasoning content: decide what to do with buffered reasoning
+    if (!state.reasoningDecided) {
+        state.reasoningDecided = true;
+        if (state.pendingReasoning) {
+            if (!hasToolCalls) {
+                // Text response: emit reasoning as an Anthropic thinking block
+                flushReasoningAsThinking(state, raw);
+            } else {
+                // Tool-call response: discard to prevent block-index mismatch
+                state.pendingReasoning = '';
+            }
+        }
+    }
 
     // Handle text content
     if (delta.content) {
@@ -150,6 +180,12 @@ function processChunk(
 
     // Handle finish reason
     if (choice.finish_reason) {
+        // Flush reasoning for responses that produced only reasoning and no content
+        if (!state.reasoningDecided && state.pendingReasoning) {
+            state.reasoningDecided = true;
+            flushReasoningAsThinking(state, raw);
+        }
+
         if (state.textBlockOpen) {
             sendContentBlockStop(state.contentBlockIndex, raw);
             state.textBlockOpen = false;
@@ -215,6 +251,16 @@ function processToolCallDelta(
     }
 }
 
+function flushReasoningAsThinking(state: StreamingState, raw: any): void {
+    if (!state.pendingReasoning) return;
+    const index = state.contentBlockIndex;
+    sendContentBlockStart(index, 'thinking', '', raw);
+    sendThinkingDelta(index, state.pendingReasoning, raw);
+    sendContentBlockStop(index, raw);
+    state.contentBlockIndex++;
+    state.pendingReasoning = '';
+}
+
 function sendMessageStart(state: StreamingState, raw: any): void {
     const event = {
         type: 'message_start',
@@ -238,7 +284,7 @@ function sendMessageStart(state: StreamingState, raw: any): void {
 
 function sendContentBlockStart(
     index: number,
-    type: 'text' | 'tool_use',
+    type: 'text' | 'tool_use' | 'thinking',
     textOrName: string,
     raw: any,
     id?: string
@@ -247,6 +293,8 @@ function sendContentBlockStart(
 
     if (type === 'text') {
         contentBlock = { type: 'text', text: '' };
+    } else if (type === 'thinking') {
+        contentBlock = { type: 'thinking', thinking: '' };
     } else {
         contentBlock = {
             type: 'tool_use',
@@ -271,6 +319,18 @@ function sendTextDelta(index: number, text: string, raw: any): void {
         delta: {
             type: 'text_delta',
             text,
+        },
+    };
+    sendSSE(event, raw);
+}
+
+function sendThinkingDelta(index: number, thinking: string, raw: any): void {
+    const event = {
+        type: 'content_block_delta',
+        index,
+        delta: {
+            type: 'thinking_delta',
+            thinking,
         },
     };
     sendSSE(event, raw);
