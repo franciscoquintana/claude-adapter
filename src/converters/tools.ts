@@ -3,17 +3,22 @@ import { AnthropicToolDefinition, AnthropicToolChoice } from '../types/anthropic
 import { OpenAITool, OpenAIToolChoice } from '../types/openai';
 
 /**
- * Convert Anthropic tool definitions to OpenAI function format
+ * Convert Anthropic tool definitions to OpenAI function format.
+ * Skips Anthropic server-side tools (web_search, computer, bash, code_execution, text_editor)
+ * which carry a `type` field and are executed by Anthropic's servers — they cannot run on
+ * OpenAI-compatible upstreams and would otherwise cause the model to hang waiting for results.
  */
 export function convertToolsToOpenAI(tools: AnthropicToolDefinition[]): OpenAITool[] {
-    return tools.map(tool => ({
-        type: 'function' as const,
-        function: {
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.input_schema,
-        },
-    }));
+    return tools
+        .filter(tool => !(tool as unknown as { type?: string }).type)
+        .map(tool => ({
+            type: 'function' as const,
+            function: {
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.input_schema,
+            },
+        }));
 }
 
 /**
