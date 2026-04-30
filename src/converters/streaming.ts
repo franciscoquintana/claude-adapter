@@ -57,6 +57,7 @@ interface StreamingState {
     textBlockOpen: boolean;
     pendingReasoning: string;
     reasoningDecided: boolean;
+    finishReason: string | null;
 }
 
 /**
@@ -83,6 +84,7 @@ export async function streamOpenAIToAnthropic(
         textBlockOpen: false,
         pendingReasoning: '',
         reasoningDecided: false,
+        finishReason: null,
     };
 
     // Access the underlying Node.js response for SSE streaming
@@ -102,7 +104,7 @@ export async function streamOpenAIToAnthropic(
         // Send final events
         finishStream(state, raw);
     } catch (error) {
-        sendErrorEvent(error as Error, state, raw);
+        sendErrorEvent(error as Error | null | undefined, state, raw);
     }
 }
 
@@ -132,7 +134,7 @@ function processChunk(
         state.hasStarted = true;
     }
 
-    const delta = choice.delta;
+    const delta = choice.delta || {};
     const reasoning = (delta as any).reasoning_content;
     const hasReasoning = typeof reasoning === 'string' && reasoning.length > 0;
     const hasContent = typeof delta.content === 'string' && delta.content.length > 0;
@@ -180,6 +182,7 @@ function processChunk(
 
     // Handle finish reason
     if (choice.finish_reason) {
+        state.finishReason = choice.finish_reason;
         // Flush reasoning for responses that produced only reasoning and no content
         if (!state.reasoningDecided && state.pendingReasoning) {
             state.reasoningDecided = true;
@@ -248,6 +251,21 @@ function processToolCallDelta(
     if (toolCall.function?.arguments) {
         currentCall.arguments += toolCall.function.arguments;
         sendInputJsonDelta(currentCall.blockIndex, toolCall.function.arguments, raw);
+    }
+}
+
+function mapFinishReasonToAnthropic(finishReason: string | null, hasToolCalls: boolean): 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' {
+    switch (finishReason) {
+        case 'tool_calls':
+            return 'tool_use';
+        case 'length':
+            return 'max_tokens';
+        case 'stop':
+            return 'end_turn';
+        case 'content_filter':
+            return 'end_turn';
+        default:
+            return hasToolCalls ? 'tool_use' : 'end_turn';
     }
 }
 
@@ -357,9 +375,9 @@ function sendContentBlockStop(index: number, raw: any): void {
 }
 
 function finishStream(state: StreamingState, raw: any): void {
-    // Determine stop reason
+    // Determine stop reason: prefer the actual finish_reason from the upstream response
     const hasToolCalls = state.currentToolCalls.size > 0;
-    const stopReason = hasToolCalls ? 'tool_use' : 'end_turn';
+    const stopReason = mapFinishReasonToAnthropic(state.finishReason, hasToolCalls);
 
     // Record token usage
     recordUsage({
@@ -393,9 +411,10 @@ function finishStream(state: StreamingState, raw: any): void {
     raw.end();
 }
 
-function sendErrorEvent(error: Error, state: StreamingState, raw: any): void {
+function sendErrorEvent(error: Error | null | undefined, state: StreamingState, raw: any): void {
+    const safeError = error instanceof Error ? error : new Error(typeof error === 'string' ? error : 'Unknown stream error');
     // Record error to file
-    recordError(error, {
+    recordError(safeError, {
         requestId: state.messageId,
         provider: state.provider,
         modelName: state.model,
@@ -406,7 +425,7 @@ function sendErrorEvent(error: Error, state: StreamingState, raw: any): void {
         type: 'error',
         error: {
             type: 'api_error',
-            message: error.message,
+            message: safeError.message ?? 'Unknown stream error',
         },
     };
     sendSSE(event, raw);
