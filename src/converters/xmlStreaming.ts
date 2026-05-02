@@ -36,7 +36,8 @@ export async function streamXmlOpenAIToAnthropic(
     openaiStream: Stream<OpenAIStreamChunk>,
     reply: FastifyReply,
     originalModel: string,
-    provider: string = ''
+    provider: string = '',
+    estimatedInputTokens: number = 0
 ): Promise<void> {
     const state: BufferedState = {
         messageId: `msg_${Date.now().toString(36)}`,
@@ -44,7 +45,7 @@ export async function streamXmlOpenAIToAnthropic(
         responseModel: '',
         provider,
         contentBlockIndex: 0,
-        inputTokens: 0,
+        inputTokens: estimatedInputTokens,
         outputTokens: 0,
         cachedInputTokens: 0,
         hasStarted: false,
@@ -78,11 +79,17 @@ function processChunk(
     state: BufferedState,
     raw: any
 ): void {
-    // Update usage if present
+    // Update usage if present (only overwrite estimate when upstream gives a real number)
     if (chunk.usage) {
-        state.inputTokens = chunk.usage.prompt_tokens;
-        state.outputTokens = chunk.usage.completion_tokens;
-        state.cachedInputTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
+        if (typeof chunk.usage.prompt_tokens === 'number') {
+            state.inputTokens = chunk.usage.prompt_tokens;
+        }
+        if (typeof chunk.usage.completion_tokens === 'number') {
+            state.outputTokens = chunk.usage.completion_tokens;
+        }
+        if (typeof chunk.usage.prompt_tokens_details?.cached_tokens === 'number') {
+            state.cachedInputTokens = chunk.usage.prompt_tokens_details.cached_tokens;
+        }
     }
 
     // Capture response model

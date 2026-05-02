@@ -147,7 +147,8 @@ async function handleStreamingRequest(
         stream: true,
     } as OpenAI.ChatCompletionCreateParamsStreaming);
 
-    await streamOpenAIToAnthropic(stream as any, reply, originalModel, provider);
+    const estimatedInputTokens = estimateInputTokens(openaiRequest.messages);
+    await streamOpenAIToAnthropic(stream as any, reply, originalModel, provider, estimatedInputTokens);
     log.debug('Streaming completed');
 }
 
@@ -169,8 +170,43 @@ async function handleXmlStreamingRequest(
         stream: true,
     } as OpenAI.ChatCompletionCreateParamsStreaming);
 
-    await streamXmlOpenAIToAnthropic(stream as any, reply, originalModel, provider);
+    const estimatedInputTokens = estimateInputTokens(openaiRequest.messages);
+    await streamXmlOpenAIToAnthropic(stream as any, reply, originalModel, provider, estimatedInputTokens);
     log.debug('XML streaming completed');
+}
+
+/**
+ * Rough character-based input token estimate. Used to populate `input_tokens`
+ * in the initial `message_start` event for upstreams (e.g. NVIDIA glm-5.1) that
+ * only deliver real `usage` info in the final stream chunk. The real value
+ * overwrites this estimate as soon as upstream usage arrives.
+ */
+function estimateInputTokens(messages: unknown): number {
+    if (!Array.isArray(messages)) return 0;
+    let chars = 0;
+    for (const msg of messages) {
+        if (!msg || typeof msg !== 'object') continue;
+        const content = (msg as any).content;
+        if (typeof content === 'string') {
+            chars += content.length;
+        } else if (Array.isArray(content)) {
+            for (const part of content) {
+                if (typeof part === 'string') chars += part.length;
+                else if (part && typeof part === 'object' && typeof (part as any).text === 'string') {
+                    chars += (part as any).text.length;
+                }
+            }
+        }
+        const toolCalls = (msg as any).tool_calls;
+        if (Array.isArray(toolCalls)) {
+            for (const tc of toolCalls) {
+                const name = tc?.function?.name ?? '';
+                const args = tc?.function?.arguments ?? '';
+                chars += String(name).length + String(args).length;
+            }
+        }
+    }
+    return Math.ceil(chars / 4);
 }
 
 /**
