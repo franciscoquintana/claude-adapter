@@ -11,6 +11,7 @@ import { validateAnthropicRequest, formatValidationErrors } from '../utils/valid
 import { logger, RequestLogger } from '../utils/logger';
 import { recordUsage } from '../utils/tokenUsage';
 import { recordError } from '../utils/errorLog';
+import { kimiDebug } from '../utils/kimiDebug';
 
 // Request ID counter for unique identification
 let requestIdCounter = 0;
@@ -55,11 +56,33 @@ export function createMessagesHandler(config: AdapterConfig) {
 
             log.info(`→ ${targetModel} [sent]`);
 
+            kimiDebug(targetModel, 'anthropic_request', {
+                model: targetModel,
+                streaming: isStreaming,
+                messageCount: anthropicRequest.messages?.length ?? 0,
+                toolCount: anthropicRequest.tools?.length ?? 0,
+                toolNames: anthropicRequest.tools?.map((t: any) => t.name) ?? [],
+                lastMessage: summarizeMessage(anthropicRequest.messages?.[anthropicRequest.messages.length - 1]),
+            }, requestId);
+
             // Determine tool calling style from config
             const toolStyle = config.toolFormat || 'native';
 
             // Convert request to OpenAI format
             const openaiRequest = convertRequestToOpenAI(anthropicRequest, targetModel, toolStyle);
+
+            kimiDebug(targetModel, 'openai_request', {
+                model: openaiRequest.model,
+                messageCount: Array.isArray(openaiRequest.messages) ? openaiRequest.messages.length : 0,
+                roles: Array.isArray(openaiRequest.messages) ? openaiRequest.messages.map((m: any) => m.role) : [],
+                toolCount: Array.isArray((openaiRequest as any).tools) ? (openaiRequest as any).tools.length : 0,
+                tools: Array.isArray((openaiRequest as any).tools)
+                    ? (openaiRequest as any).tools.map((t: any) => ({
+                          name: t.function?.name,
+                          description: typeof t.function?.description === 'string' ? t.function.description.slice(0, 200) : undefined,
+                      }))
+                    : [],
+            }, requestId);
 
             // Log tool calling mode when tools are present
             if (toolStyle === 'xml' && anthropicRequest.tools?.length) {
@@ -68,9 +91,9 @@ export function createMessagesHandler(config: AdapterConfig) {
 
             if (isStreaming) {
                 if (toolStyle === 'xml') {
-                    await handleXmlStreamingRequest(openai, openaiRequest, reply, anthropicRequest.model, config.baseUrl, log);
+                    await handleXmlStreamingRequest(openai, openaiRequest, reply, anthropicRequest.model, config.baseUrl, log, requestId);
                 } else {
-                    await handleStreamingRequest(openai, openaiRequest, reply, anthropicRequest.model, config.baseUrl, log);
+                    await handleStreamingRequest(openai, openaiRequest, reply, anthropicRequest.model, config.baseUrl, log, requestId);
                 }
             } else {
                 await handleNonStreamingRequest(openai, openaiRequest, reply, anthropicRequest.model, config.baseUrl, log);
@@ -138,7 +161,8 @@ async function handleStreamingRequest(
     reply: FastifyReply,
     originalModel: string,
     provider: string,
-    log: RequestLogger
+    log: RequestLogger,
+    requestId?: string
 ): Promise<void> {
     log.debug('Making streaming request');
 
@@ -148,7 +172,7 @@ async function handleStreamingRequest(
     } as OpenAI.ChatCompletionCreateParamsStreaming);
 
     const estimatedInputTokens = estimateInputTokens(openaiRequest.messages);
-    await streamOpenAIToAnthropic(stream as any, reply, originalModel, provider, estimatedInputTokens);
+    await streamOpenAIToAnthropic(stream as any, reply, originalModel, provider, estimatedInputTokens, requestId);
     log.debug('Streaming completed');
 }
 
@@ -161,7 +185,8 @@ async function handleXmlStreamingRequest(
     reply: FastifyReply,
     originalModel: string,
     provider: string,
-    log: RequestLogger
+    log: RequestLogger,
+    requestId?: string
 ): Promise<void> {
     log.debug('Making XML streaming request (experimental)');
 
@@ -171,8 +196,28 @@ async function handleXmlStreamingRequest(
     } as OpenAI.ChatCompletionCreateParamsStreaming);
 
     const estimatedInputTokens = estimateInputTokens(openaiRequest.messages);
-    await streamXmlOpenAIToAnthropic(stream as any, reply, originalModel, provider, estimatedInputTokens);
+    await streamXmlOpenAIToAnthropic(stream as any, reply, originalModel, provider, estimatedInputTokens, requestId);
     log.debug('XML streaming completed');
+}
+
+function summarizeMessage(msg: unknown): unknown {
+    if (!msg || typeof msg !== 'object') return null;
+    const m = msg as any;
+    const blockTypes = Array.isArray(m.content)
+        ? m.content.map((b: any) => (typeof b === 'string' ? 'text' : b?.type ?? 'unknown'))
+        : typeof m.content === 'string'
+            ? ['text']
+            : [];
+    return {
+        role: m.role,
+        contentTypes: blockTypes,
+        toolUseIds: Array.isArray(m.content)
+            ? m.content.filter((b: any) => b?.type === 'tool_use').map((b: any) => b.id)
+            : [],
+        toolResultIds: Array.isArray(m.content)
+            ? m.content.filter((b: any) => b?.type === 'tool_result').map((b: any) => b.tool_use_id)
+            : [],
+    };
 }
 
 /**

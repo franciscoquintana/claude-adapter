@@ -9,6 +9,7 @@ import { OpenAIStreamChunk, OpenAIStreamToolCall } from '../types/openai';
 import { generateToolUseId } from './tools';
 import { recordUsage } from '../utils/tokenUsage';
 import { recordError } from '../utils/errorLog';
+import { kimiDebug } from '../utils/kimiDebug';
 
 // Global counter and set for unique tool IDs within this process
 let toolIdCounter = 0;
@@ -58,6 +59,7 @@ interface StreamingState {
     pendingReasoning: string;
     reasoningDecided: boolean;
     finishReason: string | null;
+    requestId?: string;
 }
 
 /**
@@ -68,7 +70,8 @@ export async function streamOpenAIToAnthropic(
     reply: FastifyReply,
     originalModel: string,
     provider: string = '',
-    estimatedInputTokens: number = 0
+    estimatedInputTokens: number = 0,
+    requestId?: string
 ): Promise<void> {
     const state: StreamingState = {
         messageId: `msg_${Date.now().toString(36)}`,
@@ -86,6 +89,7 @@ export async function streamOpenAIToAnthropic(
         pendingReasoning: '',
         reasoningDecided: false,
         finishReason: null,
+        requestId,
     };
 
     // Access the underlying Node.js response for SSE streaming
@@ -182,6 +186,15 @@ function processChunk(
 
     // Handle tool calls
     if (delta.tool_calls) {
+        kimiDebug(state.model, 'upstream_tool_call_chunk', {
+            chunks: delta.tool_calls.map((tc: any) => ({
+                index: tc.index,
+                id: tc.id,
+                name: tc.function?.name,
+                argsDelta: tc.function?.arguments,
+                argsDeltaLength: typeof tc.function?.arguments === 'string' ? tc.function.arguments.length : 0,
+            })),
+        }, state.requestId);
         for (const toolCall of delta.tool_calls) {
             processToolCallDelta(toolCall, state, raw);
         }
@@ -244,6 +257,14 @@ function processToolCallDelta(
             blockIndex,
         };
         state.currentToolCalls.set(index, newToolCall);
+
+        kimiDebug(state.model, 'tool_call_open', {
+            index,
+            id: toolId,
+            originalUpstreamId: toolCall.id ?? null,
+            name: newToolCall.name,
+            blockIndex,
+        }, state.requestId);
 
         sendContentBlockStart(blockIndex, 'tool_use', newToolCall.name, raw, newToolCall.id);
     }
@@ -385,6 +406,36 @@ function finishStream(state: StreamingState, raw: any): void {
     // Determine stop reason: prefer the actual finish_reason from the upstream response
     const hasToolCalls = state.currentToolCalls.size > 0;
     const stopReason = mapFinishReasonToAnthropic(state.finishReason, hasToolCalls);
+
+    // Debug: log final state of every accumulated tool call (kimi only).
+    for (const [index, tc] of state.currentToolCalls) {
+        let jsonValid = false;
+        let parseError: string | undefined;
+        try {
+            JSON.parse(tc.arguments);
+            jsonValid = true;
+        } catch (e) {
+            parseError = e instanceof Error ? e.message : String(e);
+        }
+        kimiDebug(state.model, 'tool_call_finalized', {
+            index,
+            id: tc.id,
+            name: tc.name,
+            blockIndex: tc.blockIndex,
+            argsLength: tc.arguments.length,
+            args: tc.arguments,
+            jsonValid,
+            parseError,
+        }, state.requestId);
+    }
+
+    kimiDebug(state.model, 'stream_finished', {
+        finishReason: state.finishReason,
+        stopReason,
+        toolCallCount: state.currentToolCalls.size,
+        inputTokens: state.inputTokens,
+        outputTokens: state.outputTokens,
+    }, state.requestId);
 
     // Record token usage
     recordUsage({

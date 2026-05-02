@@ -7,6 +7,7 @@ import { OpenAIStreamChunk } from '../types/openai';
 import { generateToolUseId } from './tools';
 import { recordUsage } from '../utils/tokenUsage';
 import { recordError } from '../utils/errorLog';
+import { kimiDebug } from '../utils/kimiDebug';
 
 interface BufferedState {
     messageId: string;
@@ -20,6 +21,7 @@ interface BufferedState {
     hasStarted: boolean;
     buffer: string;  // Accumulates all text
     toolCallsEmitted: number;  // Count of tool calls emitted
+    requestId?: string;
 }
 
 // Regex patterns
@@ -37,7 +39,8 @@ export async function streamXmlOpenAIToAnthropic(
     reply: FastifyReply,
     originalModel: string,
     provider: string = '',
-    estimatedInputTokens: number = 0
+    estimatedInputTokens: number = 0,
+    requestId?: string
 ): Promise<void> {
     const state: BufferedState = {
         messageId: `msg_${Date.now().toString(36)}`,
@@ -51,6 +54,7 @@ export async function streamXmlOpenAIToAnthropic(
         hasStarted: false,
         buffer: '',
         toolCallsEmitted: 0,
+        requestId,
     };
 
     const raw = reply.raw;
@@ -275,6 +279,14 @@ function sendMessageStart(state: BufferedState, raw: any): void {
 function finishStream(state: BufferedState, raw: any): void {
     // Determine stop reason
     const stopReason = state.toolCallsEmitted > 0 ? 'tool_use' : 'end_turn';
+
+    kimiDebug(state.model, 'stream_finished', {
+        stopReason,
+        toolCallsEmitted: state.toolCallsEmitted,
+        bufferTail: state.buffer.slice(-500),
+        inputTokens: state.inputTokens,
+        outputTokens: state.outputTokens,
+    }, state.requestId);
 
     // Record token usage
     recordUsage({
