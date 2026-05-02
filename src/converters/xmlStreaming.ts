@@ -100,6 +100,12 @@ function processChunk(
     }
 
     const textDelta = choice.delta?.content || '';
+    const reasoningDelta = (choice.delta as any)?.reasoning_content ?? (choice.delta as any)?.reasoning;
+
+    if (typeof reasoningDelta === 'string' && reasoningDelta.length > 0) {
+        state.buffer += `<think>${reasoningDelta}</think>`;
+    }
+
     if (!textDelta) return;
 
     // Add to buffer

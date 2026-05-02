@@ -135,7 +135,7 @@ function processChunk(
     }
 
     const delta = choice.delta || {};
-    const reasoning = (delta as any).reasoning_content;
+    const reasoning = (delta as any).reasoning_content ?? (delta as any).reasoning;
     const hasReasoning = typeof reasoning === 'string' && reasoning.length > 0;
     const hasContent = typeof delta.content === 'string' && delta.content.length > 0;
     const hasToolCalls = Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0;
