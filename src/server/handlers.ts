@@ -96,7 +96,7 @@ export function createMessagesHandler(config: AdapterConfig) {
                     await handleStreamingRequest(openai, openaiRequest, reply, anthropicRequest.model, config.baseUrl, log, requestId);
                 }
             } else {
-                await handleNonStreamingRequest(openai, openaiRequest, reply, anthropicRequest.model, config.baseUrl, log);
+                await handleNonStreamingRequest(openai, openaiRequest, reply, anthropicRequest.model, config.baseUrl, log, requestId);
             }
 
             log.info(`← ${targetModel} [received]`);
@@ -121,7 +121,8 @@ async function handleNonStreamingRequest(
     reply: FastifyReply,
     originalModel: string,
     provider: string,
-    log: RequestLogger
+    log: RequestLogger,
+    requestId?: string
 ): Promise<void> {
     log.debug('Making non-streaming request');
 
@@ -134,6 +135,37 @@ async function handleNonStreamingRequest(
         finishReason: response.choices[0]?.finish_reason,
         usage: response.usage
     });
+
+    const choice = response.choices[0];
+    const message = choice?.message as any;
+    const toolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+    kimiDebug(originalModel, 'nonstream_response', {
+        finishReason: choice?.finish_reason ?? null,
+        hasContent: typeof message?.content === 'string' && message.content.length > 0,
+        contentPreview: typeof message?.content === 'string' ? message.content.slice(0, 500) : null,
+        toolCallCount: toolCalls.length,
+        toolCalls: toolCalls.map((tc: any) => {
+            const args = tc.function?.arguments ?? '';
+            let jsonValid = false;
+            let parseError: string | undefined;
+            try {
+                JSON.parse(args);
+                jsonValid = true;
+            } catch (e) {
+                parseError = e instanceof Error ? e.message : String(e);
+            }
+            return {
+                id: tc.id ?? null,
+                idLooksOpenAi: typeof tc.id === 'string' && tc.id.startsWith('call_'),
+                name: tc.function?.name,
+                argsLength: typeof args === 'string' ? args.length : 0,
+                args,
+                jsonValid,
+                parseError,
+            };
+        }),
+        usage: response.usage,
+    }, requestId);
 
     // Record token usage
     if (response.usage) {
