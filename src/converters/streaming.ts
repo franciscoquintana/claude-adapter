@@ -109,26 +109,27 @@ export async function streamOpenAIToAnthropic(
         // Send final events
         finishStream(state, raw);
     } catch (error) {
-        const hasEmittedContent =
-            state.hasStarted &&
-            (state.textBlockOpen || state.currentToolCalls.size > 0);
+        const msg = error instanceof Error ? error.message : String(error);
 
-        if (hasEmittedContent) {
-            console.warn('[claude-adapter] Upstream stream ended prematurely, closing gracefully', {
-                error: error instanceof Error ? error.message : String(error),
+        const isTransientUpstream =
+            /premature close|socket hang up|other side closed|ECONNRESET|ETIMEDOUT|stream idle timeout|terminated|fetch failed/i.test(msg);
+
+        if (isTransientUpstream) {
+            console.warn('[claude-adapter] Upstream stream cut mid-response, signaling retry', {
+                error: msg,
                 requestId: state.requestId,
                 model: state.model,
+                hadContent: state.textBlockOpen || state.currentToolCalls.size > 0,
             });
-            if (state.textBlockOpen) {
-                sendContentBlockStop(state.contentBlockIndex, raw);
-                state.textBlockOpen = false;
-            }
-            for (const [, tc] of state.currentToolCalls) {
-                if (typeof tc.blockIndex === 'number') {
-                    sendContentBlockStop(tc.blockIndex, raw);
-                }
-            }
-            finishStream(state, raw);
+            const event = {
+                type: 'error',
+                error: {
+                    type: 'overloaded_error',
+                    message: `Upstream stream closed: ${msg}`,
+                },
+            };
+            sendSSE(event, raw);
+            raw.end();
         } else {
             sendErrorEvent(error as Error | null | undefined, state, raw);
         }
