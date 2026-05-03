@@ -109,7 +109,29 @@ export async function streamOpenAIToAnthropic(
         // Send final events
         finishStream(state, raw);
     } catch (error) {
-        sendErrorEvent(error as Error | null | undefined, state, raw);
+        const hasEmittedContent =
+            state.hasStarted &&
+            (state.textBlockOpen || state.currentToolCalls.size > 0);
+
+        if (hasEmittedContent) {
+            console.warn('[claude-adapter] Upstream stream ended prematurely, closing gracefully', {
+                error: error instanceof Error ? error.message : String(error),
+                requestId: state.requestId,
+                model: state.model,
+            });
+            if (state.textBlockOpen) {
+                sendContentBlockStop(state.contentBlockIndex, raw);
+                state.textBlockOpen = false;
+            }
+            for (const [, tc] of state.currentToolCalls) {
+                if (typeof tc.blockIndex === 'number') {
+                    sendContentBlockStop(tc.blockIndex, raw);
+                }
+            }
+            finishStream(state, raw);
+        } else {
+            sendErrorEvent(error as Error | null | undefined, state, raw);
+        }
     }
 }
 
