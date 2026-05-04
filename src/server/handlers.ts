@@ -1,6 +1,7 @@
 // Proxy server request handlers
 import { FastifyRequest, FastifyReply } from 'fastify';
 import OpenAI from 'openai';
+import { Agent } from 'undici';
 import { AnthropicMessageRequest } from '../types/anthropic';
 import { AdapterConfig } from '../types/config';
 import { convertRequestToOpenAI } from '../converters/request';
@@ -23,6 +24,18 @@ function generateRequestId(): string {
     return `req_${timestamp}_${counter} `;
 }
 
+// undici dispatcher with disabled body timeout: models like minimax-m2.7 pause
+// >30s between chunks during reasoning, which would otherwise abort the stream.
+const longLivedDispatcher = new Agent({
+    bodyTimeout: 0,
+    headersTimeout: 600_000,
+    keepAliveTimeout: 10_000,
+    keepAliveMaxTimeout: 600_000,
+});
+
+const longLivedFetch: typeof fetch = (input, init) =>
+    fetch(input as any, { ...(init ?? {}), dispatcher: longLivedDispatcher } as any);
+
 /**
  * Handle POST /v1/messages requests
  */
@@ -30,6 +43,8 @@ export function createMessagesHandler(config: AdapterConfig) {
     const openai = new OpenAI({
         baseURL: config.baseUrl,
         apiKey: config.apiKey,
+        timeout: 600_000,
+        fetch: longLivedFetch,
     });
 
     return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
