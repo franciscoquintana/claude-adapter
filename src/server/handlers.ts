@@ -1,7 +1,7 @@
 // Proxy server request handlers
 import { FastifyRequest, FastifyReply } from 'fastify';
 import OpenAI from 'openai';
-import { Agent } from 'undici';
+import { Agent, fetch as undiciFetch } from 'undici';
 import { AnthropicMessageRequest } from '../types/anthropic';
 import { AdapterConfig } from '../types/config';
 import { convertRequestToOpenAI } from '../converters/request';
@@ -33,8 +33,11 @@ const longLivedDispatcher = new Agent({
     keepAliveMaxTimeout: 600_000,
 });
 
-const longLivedFetch: typeof fetch = (input, init) =>
-    fetch(input as any, { ...(init ?? {}), dispatcher: longLivedDispatcher } as any);
+// Use undici's fetch directly so our Agent dispatcher actually applies.
+// Node's global fetch ships its own bundled undici and would ignore an
+// external Agent from a different version, causing instant connection errors.
+const longLivedFetch = ((input: any, init?: any) =>
+    undiciFetch(input, { ...(init ?? {}), dispatcher: longLivedDispatcher })) as unknown as typeof fetch;
 
 /**
  * Handle POST /v1/messages requests
